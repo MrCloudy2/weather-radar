@@ -53,7 +53,10 @@ async function boot() {
     fetch(`${API}/timeline?node=silis`).then(r => r.json()),
   ]);
 
-  state.gridBounds = src.grid.bounds;
+  state.gridBounds = src.grid.base_bounds || src.grid.bounds;
+  state.baseBounds = src.grid.base_bounds || src.grid.bounds;
+  state.wideBounds = src.grid.wide_bounds || src.grid.bounds;
+  state.wideProducts = new Set(src.grid.wide_products || []);
   state.siteById = Object.fromEntries(
     src.sources.map(s => [s.id, { name: s.name, lat: s.lat, lon: s.lon, country: s.country }])
   );
@@ -66,8 +69,10 @@ async function boot() {
 
   // Build source options: composite first, then each active radar.
   const active = src.sources.filter(s => s.active);
+  const siOnly = active.filter(s => s.country === 'SI').map(s => s.id);
   state.sources = [
     { value: `comp:${src.default_composite.join(',')}`, label: '◆ Composite (SI+HR)' },
+    { value: `comp:${siOnly.join(',')}`, label: '◆ Composite (SI only)' },
     ...active.map(s => ({
       value: `single:${s.id}`,
       label: `${s.name}${s.country !== 'SI' ? ' (' + s.country + ')' : ''}`,
@@ -219,6 +224,13 @@ function tileUrl(cfg, key) {
 
 function targetOpacity(panel) { return panel.cfg.moment === 'MOTION' ? 0.4 : 0.85; }
 
+// Reflectivity products (and MOTION's reflectivity backdrop) render on the WIDE
+// grid; everything else on the BASE grid. Overlay bounds must match.
+function boundsForMoment(moment) {
+  const wide = state.wideProducts.has(moment) || moment === 'MOTION';
+  return wide ? state.wideBounds : state.baseBounds;
+}
+
 function showLoader(panel, label) {
   panel.loading.className = 'map-loading show';
   panel.loading.querySelector('span').textContent = `Rendering ${label}…`;
@@ -239,6 +251,7 @@ function updatePanel(panel, cfgChanged = false) {
   if (!key) return;
   const label = MOMENT_LABEL[panel.cfg.moment] || panel.cfg.moment;
   if (cfgChanged) showLoader(panel, label);     // switching product: hide old, spin
+  panel.overlay.setBounds(boundsForMoment(panel.cfg.moment));  // wide vs base grid
   panel.overlay.setUrl(tileUrl(panel.cfg, key));
   updateArrows(panel);
   if (cfgChanged) { updateLegend(panel); updateMarkers(panel); preloadPanel(panel); }

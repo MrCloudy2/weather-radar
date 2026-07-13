@@ -1,8 +1,11 @@
 .venv/
 data/
+archive/
 __pycache__/
 *.pyc
 .git/
 scripts/
 deploy/
 .claude/
+radar/*.so
+.gitignore

@@ -25,7 +25,7 @@ WINDOW = timedelta(minutes=90)
 POLL_SECONDS = 60
 RENDER_CACHE_MAX = 512
 NEAREST_TOL = timedelta(minutes=6)   # max gap when matching radars in a composite
-GRID = config.SLOVENIA_GRID
+GRID = config.BASE_GRID          # default (velocity / heavy / analysis products)
 ARCHIVE = timedelta(hours=config.ARCHIVE_HOURS)
 # At most this many renders run at once, so a burst of requests (or the eager
 # frame preload) can never peg CPU / exhaust memory on a shared server.
@@ -116,15 +116,16 @@ class Store:
             return None
         is_column = quantity in composite.COLUMN_PRODUCTS
         use_cmax = cmax and quantity in composite.CMAX_MOMENTS
+        grid = config.grid_for(quantity)      # reflectivity -> wide, else base
         mode = "col" if is_column else ("cmax" if use_cmax else sweep)
         ck = ("single", node, key, quantity, mode, dealias)
         if is_column:
-            produce = lambda: render.render_column(frame.path, quantity, GRID, dealias)
+            produce = lambda: render.render_column(frame.path, quantity, grid, dealias)
         elif use_cmax:
-            produce = lambda: render.render_cmax(frame.path, quantity, GRID, dealias)
+            produce = lambda: render.render_cmax(frame.path, quantity, grid, dealias)
         else:
             produce = lambda: render.render_sweep(
-                frame.path, quantity, GRID, sweep, dealias=dealias
+                frame.path, quantity, grid, sweep, dealias=dealias
             )
         try:
             return self._cached(ck, produce)
@@ -154,6 +155,7 @@ class Store:
         if not paths:
             return None
         is_column = quantity in composite.COLUMN_PRODUCTS
+        grid = config.grid_for(quantity)      # reflectivity -> wide, else base
         mode = "col" if is_column else ("cmax" if use_cmax else sweep)
         ck = ("comp", tuple(sorted(nodes)), key, quantity, mode, dealias)
         try:
@@ -161,9 +163,9 @@ class Store:
                 ck,
                 lambda: render.render_grid(
                     composite.build_composite(
-                        paths, quantity, GRID, sweep, dealias, cmax=use_cmax
+                        paths, quantity, grid, sweep, dealias, cmax=use_cmax
                     ),
-                    quantity, GRID,
+                    quantity, grid,
                 ),
             )
         except (KeyError, IndexError):
@@ -193,9 +195,10 @@ class Store:
         p = self._archive_path(key)
         if not p.exists():
             return None
+        ag = config.grid_for(config.ARCHIVE_QUANTITY)     # flagship is on WIDE
         return render.RenderResult(
-            png=p.read_bytes(), bounds=GRID.leaflet_bounds,
-            width=GRID.width, height=GRID.height,
+            png=p.read_bytes(), bounds=ag.leaflet_bounds,
+            width=ag.width, height=ag.height,
         )
 
     def archive_keys(self) -> list[str]:

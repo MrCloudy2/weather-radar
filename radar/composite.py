@@ -38,29 +38,40 @@ def build_composite(
     """
     is_column = quantity in COLUMN_PRODUCTS
     use_cmax = cmax and quantity in CMAX_MOMENTS
+    shape = (grid.height, grid.width)
+
+    def _sample_one(p):
+        if is_column:
+            return render.sample_column_to_grid(p, quantity, grid, dealias)
+        if use_cmax:
+            return render.sample_cmax_to_grid(p, quantity, grid, dealias)
+        return render.sample_to_grid(p, quantity, grid, sweep_index, dealias)
+
+    # Max mosaic (reflectivity / column): stream a NaN-aware float32 running max
+    # so we never hold all radars' grids at once.
+    if quantity in MAX_MOMENTS:
+        best = None
+        for p in paths:
+            try:
+                v, _ = _sample_one(p)
+            except (KeyError, IndexError):
+                continue
+            arr = np.ma.filled(v, np.nan).astype(np.float32, copy=False)
+            best = arr if best is None else np.fmax(best, arr, out=best)
+        if best is None:
+            return np.ma.array(np.zeros(shape, np.float32), mask=np.ones(shape, bool))
+        return np.ma.array(np.nan_to_num(best), mask=np.isnan(best))
+
+    # Nearest-radar mosaic for velocity (and any non-max moment): needs all.
     samples = []
     for p in paths:
         try:
-            if is_column:
-                samples.append(render.sample_column_to_grid(p, quantity, grid, dealias))
-            elif use_cmax:
-                samples.append(render.sample_cmax_to_grid(p, quantity, grid, dealias))
-            else:
-                samples.append(
-                    render.sample_to_grid(p, quantity, grid, sweep_index, dealias)
-                )
+            samples.append(_sample_one(p))
         except (KeyError, IndexError):
-            continue  # this radar lacks the moment/sweep; skip it
+            continue
     if not samples:
-        shape = (grid.height, grid.width)
         return np.ma.array(np.zeros(shape), mask=np.ones(shape, bool))
-
     values = [v for v, _ in samples]
-    if quantity in MAX_MOMENTS:
-        stack = np.ma.stack(values)          # [n_radar x H x W]
-        return stack.max(axis=0)             # masked where all radars masked
-
-    # Nearest-radar mosaic for velocity (and any non-max moment).
     dists = np.stack([d for _, d in samples])          # [n x H x W]
     masks = np.stack([np.ma.getmaskarray(v) for v in values])
     data = np.stack([np.ma.getdata(v) for v in values])

@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import colormaps, geo, odim, process
+from . import _native, colormaps, geo, odim, process
 
 
 @dataclass
@@ -49,8 +49,9 @@ def _lookup_indices(
         return np.minimum(d, 360.0 - d)
 
     pick_lo = ang_gap(bearing, az[lo]) <= ang_gap(bearing, az[hi])
-    ray_idx = np.where(pick_lo, lo, hi)
-    return ray_idx, bin_idx, in_range
+    # int32 indices (grid < 2.1e9, rays<360, bins<1000) halve index memory.
+    ray_idx = np.where(pick_lo, lo, hi).astype(np.int32)
+    return ray_idx, bin_idx.astype(np.int32), in_range
 
 
 def _polar_lookup(
@@ -64,6 +65,84 @@ def _polar_lookup(
     sampled = data[ray_idx, bin_idx]
     mask = np.ma.getmaskarray(sampled) | ~in_range
     return np.ma.array(np.ma.getdata(sampled), mask=mask)
+
+
+def _sample_f32(data, geom, dist, bearing) -> np.ndarray:
+    """Sample a sweep onto the grid as float32 with NaN for invalid gates.
+
+    NaN sentinel lets the CMAX loop use np.fmax (NaN-aware max) with no mask
+    bookkeeping and half the memory of masked float64 arrays.
+    """
+    ray_idx, bin_idx, in_range = _lookup_indices(geom, dist, bearing)
+    out = np.ma.getdata(data)[ray_idx, bin_idx].astype(np.float32)
+    invalid = np.ma.getmaskarray(data)[ray_idx, bin_idx]
+    invalid |= ~in_range
+    out[invalid] = np.nan
+    return out
+
+
+# Per-radar (site + grid) distance and bearing->ray mapping are constant across
+# frames (only elevation-dependent bin lookup changes per sweep), so cache them.
+_GEOM_CACHE: dict = {}
+
+
+def _radar_grid_geom(vol, grid, sample_geom):
+    """Cached (dist_f32, ray_idx int32) from a radar site to every grid pixel."""
+    sig = (round(vol.site_lat, 4), round(vol.site_lon, 4),
+           grid.west, grid.south, grid.east, grid.north, grid.width)
+    hit = _GEOM_CACHE.get(sig)
+    if hit is not None:
+        return hit
+    lon, lat = grid.lonlat()
+    dist, bearing = geo.haversine_bearing(vol.site_lat, vol.site_lon, lat, lon)
+    az = sample_geom.az_mid           # rays ~identical across sweeps of a radar
+    n = az.size
+    hi = np.searchsorted(az, bearing) % n
+    lo = (hi - 1) % n
+
+    def ang_gap(a, b):
+        d = np.abs(a - b) % 360.0
+        return np.minimum(d, 360.0 - d)
+
+    ray_idx = np.where(ang_gap(bearing, az[lo]) <= ang_gap(bearing, az[hi]),
+                       lo, hi).astype(np.int32)
+    res = (dist.astype(np.float32), ray_idx)
+    if len(_GEOM_CACHE) > 16:
+        _GEOM_CACHE.clear()
+    _GEOM_CACHE[sig] = res
+    return res
+
+
+def _bin_edges(geom) -> np.ndarray:
+    """Ground-range bin edges [nbins+1] for one sweep (shared by numpy + native)."""
+    ground = geo.beam_ground_range(geom.slant_ranges, geom.elangle_rad)
+    edges = np.empty(ground.size + 1)
+    edges[1:-1] = (ground[:-1] + ground[1:]) / 2.0
+    edges[0] = ground[0] - (ground[1] - ground[0]) / 2.0
+    edges[-1] = ground[-1] + (ground[-1] - ground[-2]) / 2.0
+    return edges
+
+
+def _bin_lookup(geom, dist_f):
+    """Ground-range bin index + in-range mask for one sweep (per elevation)."""
+    edges = _bin_edges(geom)
+    nbins = geom.slant_ranges.size
+    bin_idx = np.searchsorted(edges, dist_f).astype(np.int32) - 1
+    in_range = (bin_idx >= 0) & (bin_idx < nbins)
+    np.clip(bin_idx, 0, nbins - 1, out=bin_idx)
+    return bin_idx, in_range
+
+
+def _sample_cached(data, ray_idx, bin_idx, in_range) -> np.ndarray:
+    """Flat-index sample -> float32 grid with NaN for invalid gates."""
+    nbins = data.shape[1]
+    flat = ray_idx * np.int32(nbins) + bin_idx     # < 360*1000, fits int32
+    raw = np.ma.getdata(data).ravel()
+    out = raw.take(flat).astype(np.float32)
+    invalid = np.ma.getmaskarray(data).ravel().take(flat)
+    invalid |= ~in_range
+    out[invalid] = np.nan
+    return out
 
 
 def prepare_sweep(
@@ -152,27 +231,45 @@ def sample_cmax_to_grid(
     across tilts is not physical.
     """
     vol = odim.summarize(path)
-    # Distance + bearing from this radar to every grid pixel are the SAME for all
-    # its tilts, so compute them once (was the dominant cost per sweep).
-    lon, lat = grid.lonlat()
-    dist, bearing = geo.haversine_bearing(vol.site_lat, vol.site_lon, lat, lon)
-    best = None          # running max over valid gates (masked -> -inf)
-    any_valid = None     # union of valid pixels across tilts
-    for s in vol.sweeps:
-        try:
-            data = prepare_sweep(path, quantity, s.index, dealias, gate_clutter)
-            geom = odim.sweep_geometry(path, s.index)
-        except (KeyError, IndexError):
-            continue
-        vals = _polar_lookup(data, geom, dist, bearing)
-        m = np.ma.getmaskarray(vals)
-        d = np.where(m, -np.inf, np.ma.getdata(vals))
-        best = d if best is None else np.maximum(best, d)
-        any_valid = ~m if any_valid is None else (any_valid | ~m)
+    geom0 = odim.sweep_geometry(path, vol.sweeps[0].index)
+    # Distance + ray mapping are constant per radar across frames (cached); only
+    # the per-elevation bin lookup changes per sweep.
+    dist_f, ray_idx = _radar_grid_geom(vol, grid, geom0)
+    shape = (grid.height, grid.width)
+
+    def _sweeps():
+        for s in vol.sweeps:
+            try:
+                data = prepare_sweep(path, quantity, s.index, dealias, gate_clutter)
+                geom = odim.sweep_geometry(path, s.index)
+            except (KeyError, IndexError):
+                continue
+            yield data, geom
+
+    if _native.HAVE_NATIVE:
+        # Fused native kernel: bin-search + sample + NaN-max in one pass/sweep.
+        ray_flat = np.ascontiguousarray(ray_idx.ravel(), np.int32)
+        dist_flat = np.ascontiguousarray(dist_f.ravel(), np.float32)
+        best = np.full(ray_flat.size, np.nan, np.float32)
+        used = False
+        for data, geom in _sweeps():
+            polar = np.ascontiguousarray(np.ma.filled(data, np.nan), np.float32)
+            _native.cmax_sweep(ray_flat, dist_flat, polar, _bin_edges(geom), best)
+            used = True
+        if not used:
+            return np.ma.array(np.zeros(shape, np.float32), mask=np.ones(shape, bool)), dist_f
+        best = best.reshape(shape)
+        return np.ma.array(np.nan_to_num(best), mask=np.isnan(best)), dist_f
+
+    # Pure-NumPy fallback (identical result).
+    best = None
+    for data, geom in _sweeps():
+        bin_idx, in_range = _bin_lookup(geom, dist_f)
+        vals = _sample_cached(data, ray_idx, bin_idx, in_range)
+        best = vals if best is None else np.fmax(best, vals, out=best)
     if best is None:
-        shape = (grid.height, grid.width)
-        return np.ma.array(np.zeros(shape), mask=np.ones(shape, bool)), dist
-    return np.ma.array(np.where(any_valid, best, 0.0), mask=~any_valid), dist
+        return np.ma.array(np.zeros(shape, np.float32), mask=np.ones(shape, bool)), dist_f
+    return np.ma.array(np.nan_to_num(best), mask=np.isnan(best)), dist_f
 
 
 def render_cmax(

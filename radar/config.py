@@ -44,9 +44,21 @@ NODES: dict[str, Node] = {
 # that actually cover Slovenia so we don't hoard the whole network.
 ACTIVE_NODES = ["silis", "sipas", "hrpun", "hrbil"]
 
-# Shared Web Mercator output grid: Slovenia + margin. West edge reaches into
-# Friuli (12.4E) to match ARSO's coverage of the border cells.
-SLOVENIA_GRID = Grid(west=12.4, south=45.2, east=16.8, north=47.0, width=1100)
+# Two Web Mercator output grids:
+#  * BASE  — Slovenia-focused; used by all the heavier products (velocity, VIL,
+#    echo tops, etc.) so their render cost/memory stay bounded.
+#  * WIDE  — extended toward the ~250 km radar range, so you can see storms
+#    forming farther out. Reflectivity only (light + Rust-accelerated). Edges are
+#    single-radar / long-range and less reliable — that's expected.
+BASE_GRID = Grid(west=12.4, south=45.2, east=16.8, north=47.0, width=1100)
+WIDE_GRID = Grid(west=11.6, south=44.4, east=18.0, north=48.2, width=1400)
+SLOVENIA_GRID = BASE_GRID          # back-compat alias
+
+WIDE_PRODUCTS = {"DBZH", "TH", "RATE"}   # reflectivity family -> extended grid
+
+
+def grid_for(quantity: str) -> Grid:
+    return WIDE_GRID if quantity in WIDE_PRODUCTS else BASE_GRID
 
 # --- Local storage ----------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

@@ -83,7 +83,12 @@ def sources():
         "sources": out,
         "moments": MOMENTS,
         "default_composite": [n.id for n in config.NODES.values() if n.composite],
-        "grid": {"bounds": config.SLOVENIA_GRID.leaflet_bounds},
+        "grid": {
+            "bounds": config.BASE_GRID.leaflet_bounds,          # default
+            "base_bounds": config.BASE_GRID.leaflet_bounds,
+            "wide_bounds": config.WIDE_GRID.leaflet_bounds,     # reflectivity
+            "wide_products": sorted(config.WIDE_PRODUCTS),
+        },
     }
 
 
