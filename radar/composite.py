@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import geo, render
+from . import _native, geo, render
 
 COLUMN_PRODUCTS = {"ET", "VIL"}                        # vertical, all-tilt
 CMAX_MOMENTS = {"DBZH", "TH", "RATE"}                  # support the CMAX toggle
@@ -71,6 +71,17 @@ def build_composite(
             continue
     if not samples:
         return np.ma.array(np.zeros(shape), mask=np.ones(shape, bool))
+    if _native.HAVE_NATIVE and "nearest_mosaic" in _native.IMPLEMENTED:
+        vals = np.ascontiguousarray(np.stack(
+            [np.ma.filled(v, np.nan).astype(np.float32).ravel()
+             for v, _ in samples]))
+        ds = np.ascontiguousarray(np.stack(
+            [np.asarray(d, np.float32).ravel() for _, d in samples]))
+        out = np.empty(vals.shape[1], np.float32)
+        if _native.nearest_mosaic(vals, ds, out):
+            out = out.reshape(shape).astype(np.float64)
+            bad = np.isnan(out)
+            return np.ma.array(np.nan_to_num(out), mask=bad)
     values = [v for v, _ in samples]
     dists = np.stack([d for _, d in samples])          # [n x H x W]
     masks = np.stack([np.ma.getmaskarray(v) for v in values])
