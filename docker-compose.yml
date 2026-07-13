@@ -1,0 +1,18 @@
+# Radar dashboard container. Publishes 8099 on the host so the existing
+# nextcloud_nginx container can reach it at http://172.18.0.1:8099 (the same
+# host-gateway pattern used by /spin, /relay, /admin).
+services:
+  radar:
+    build: .
+    container_name: radar_app
+    restart: unless-stopped
+    environment:
+      - RADAR_ROOT_PATH=/radar        # served behind Nginx at /radar
+    ports:
+      - "8099:8099"
+    volumes:
+      # Persist the 24h flagship archive on the host (survives restarts,
+      # visible at /home/cloudy/radar/archive).
+      - ./archive:/app/archive
+    mem_limit: 1536m                  # cap so radar can never OOM the host
+    cpus: 1.5                         # don't hog all cores on a shared box

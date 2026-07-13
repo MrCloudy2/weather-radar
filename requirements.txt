@@ -1,0 +1,6 @@
+requests
+numpy
+h5py
+pillow
+fastapi
+uvicorn[standard]

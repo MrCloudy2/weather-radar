@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Slovenia Radar</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="dot"></span> Slovenia Radar
+    </div>
+    <div class="layout-group" id="layoutGroup" title="Panel layout">
+      <button data-layout="1" class="active">1</button>
+      <button data-layout="2">2</button>
+      <button data-layout="4">4</button>
+    </div>
+    <div class="play-group">
+      <button id="archiveBtn" title="Toggle 24-hour reflectivity archive">24h</button>
+      <button id="stepBack" title="Previous frame">⏮</button>
+      <button id="playBtn" title="Play/Pause">▶</button>
+      <button id="stepFwd" title="Next frame">⏭</button>
+      <label class="speed">Speed
+        <select id="speedSel">
+          <option value="600">Slow</option>
+          <option value="350" selected>Normal</option>
+          <option value="150">Fast</option>
+        </select>
+      </label>
+    </div>
+    <div class="clock">
+      <span id="frameTime">–</span>
+      <span class="sub" id="frameAge"></span>
+    </div>
+  </header>
+
+  <main id="grid" class="layout-4"></main>
+
+  <footer id="timeline">
+    <input type="range" id="timeSlider" min="0" max="0" value="0" step="1" />
+    <div class="ticks" id="ticks"></div>
+  </footer>
+
+  <!-- Panel template -->
+  <template id="panelTpl">
+    <section class="panel">
+      <div class="panel-head">
+        <select class="sel-source"></select>
+        <select class="sel-moment"></select>
+        <select class="sel-tilt"></select>
+        <span class="hover-readout">move over map…</span>
+      </div>
+      <div class="map"></div>
+      <div class="legend"></div>
+    </section>
+  </template>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
