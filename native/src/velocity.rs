@@ -1,53 +1,85 @@
-//! Velocity products: nearest-radar mosaic + along-ray dealiasing (STUBS).
+//! Velocity products: nearest-radar mosaic + along-ray dealiasing.
 //!
 //! Python references: `radar/composite.py` `build_composite` (nearest branch)
 //! and `radar/process.py` `dealias`.
-
-use crate::NOT_IMPLEMENTED;
 
 /// Nearest-radar mosaic: per grid pixel choose the value from the closest radar
 /// that has a valid (non-NaN) sample. Radial velocity is radar-relative and
 /// can't be averaged across sites, so we pick nearest instead of max.
 ///
 /// `values` and `dists` are `[nradar*npix]` row-major (radar-major); `dists` is
-/// ground range from each radar to each pixel (metres).
-///
-/// TODO(implement): for each pixel `p`, over radars `r`, track the value with
-/// the smallest `dists[r*npix+p]` among those where `values[r*npix+p]` is not
-/// NaN; write it to `out[p]` (NaN if none valid).
+/// ground range from each radar to each pixel (metres). `out[p]` = value of the
+/// nearest valid radar, NaN if no radar has an echo there. Replaces the NumPy
+/// masked-inf `argmin` + fancy-index gather with one streaming pass.
 ///
 /// # Safety
 /// Pointers valid for the stated lengths.
 #[no_mangle]
 pub unsafe extern "C" fn nearest_mosaic(
-    _npix: i32,
-    _nradar: i32,
-    _values: *const f32, // [nradar*npix], NaN = invalid
-    _dists: *const f32,  // [nradar*npix], metres
-    _out: *mut f32,      // [npix]
+    npix: i32,
+    nradar: i32,
+    values: *const f32, // [nradar*npix], NaN = invalid
+    dists: *const f32,  // [nradar*npix], metres
+    out: *mut f32,      // [npix]
 ) -> i32 {
-    NOT_IMPLEMENTED
+    let npix = npix as usize;
+    let nr = nradar as usize;
+    for p in 0..npix {
+        let mut best_d = f32::INFINITY;
+        let mut best_v = f32::NAN;
+        for r in 0..nr {
+            let v = *values.add(r * npix + p);
+            if v != v {
+                continue;
+            }
+            let d = *dists.add(r * npix + p);
+            if d < best_d {
+                best_d = d;
+                best_v = v;
+            }
+        }
+        *out.add(p) = best_v;
+    }
+    crate::OK
 }
 
 /// Continuity-based along-ray velocity dealiasing, in place on a polar sweep.
 ///
 /// `vel` is `[nrays*nbins]` row-major (ray-major), NaN = invalid gate; folding
-/// interval is `2*nyquist`.
-///
-/// TODO(implement): for each ray, march outward over valid gates keeping a
-/// running reference `ref` (seed = first valid gate). For each subsequent valid
-/// gate: `n = round((ref - v)/(2*nyquist)); v += n*2*nyquist;` then
-/// `ref = 0.5*ref + 0.5*v`. Mirrors `radar/process.py::dealias`. Consider also a
-/// second pass across azimuth for the P3 "2D region-growing" upgrade.
+/// interval is `2*nyquist`. For each ray, march outward over valid gates
+/// keeping a running reference `ref` (seed = first valid gate): shift each gate
+/// by whole folding intervals to sit closest to `ref`, then track
+/// `ref = 0.5*ref + 0.5*v` to follow smooth shear. Mirrors
+/// `radar/process.py::dealias` (f64 internally, like the NumPy path).
 ///
 /// # Safety
 /// `vel` valid for `nrays*nbins`.
 #[no_mangle]
 pub unsafe extern "C" fn dealias_rays(
-    _nrays: i32,
-    _nbins: i32,
-    _vel: *mut f32, // [nrays*nbins], in/out
-    _nyquist: f32,
+    nrays: i32,
+    nbins: i32,
+    vel: *mut f32, // [nrays*nbins], in/out
+    nyquist: f32,
 ) -> i32 {
-    NOT_IMPLEMENTED
+    let nb = nbins as usize;
+    let vn2 = 2.0 * nyquist as f64;
+    for ray in 0..nrays as usize {
+        let row = vel.add(ray * nb);
+        let mut reference = f64::NAN;
+        for b in 0..nb {
+            let v = *row.add(b);
+            if v != v {
+                continue;
+            }
+            if reference != reference {
+                reference = v as f64; // seed: first valid gate assumed unfolded
+                continue;
+            }
+            let n = ((reference - v as f64) / vn2).round();
+            let unfolded = v as f64 + n * vn2;
+            *row.add(b) = unfolded as f32;
+            reference = 0.5 * reference + 0.5 * unfolded;
+        }
+    }
+    crate::OK
 }

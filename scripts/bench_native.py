@@ -133,78 +133,73 @@ def rs_sample():
 o = py_sample(); r = rs_sample()
 report("sample_sweep", timed(py_sample), (timed(lambda: rs_sample()), match(o, r[0])) if r[1] else None)
 
-# --- 3. echo tops (column, stub) -------------------------------------------
-def py_et():
-    return render.sample_column_to_grid(PATHS["silis"], "ET", GB)[0]
-
-def rs_et():
-    et = np.full(NPIXB, np.nan, np.float32)
-    ok = True
-    for polar, edges, heights in radar_ctx(PATHS["silis"], "DBZH", GB)[2]:
-        ok = _native.echo_top_sweep(vray, vdist, polar, edges, heights, 18.0, et) and ok
-    return et, ok
-
-report("echo_top", timed(py_et), (timed(lambda: rs_et()), None) if rs_et()[1] else None)
-
-# --- 4. VIL (full product, NumPy vs native kernel) ---------------------------
+# --- full-product comparisons: toggle the kernel off to time the NumPy path --
 _IMPL = _native.IMPLEMENTED
 
-def py_vil():
-    _native.IMPLEMENTED = _IMPL - {"vil_column"}      # force the NumPy path
-    try:
-        return render.sample_column_to_grid(PATHS["silis"], "VIL", GB)[0]
-    finally:
-        _native.IMPLEMENTED = _IMPL
+def compare(name, fn, kernel, to_arr, frac=0.0, n=5, check=None):
+    """Time `fn` with the kernel disabled (Python) vs enabled (Rust).
 
-def rs_vil():
-    return render.sample_column_to_grid(PATHS["silis"], "VIL", GB)[0]
+    `frac` allows a small fraction of differing pixels: the native column /
+    mosaic paths reuse cached sweep-0 azimuths, and real antenna jitter between
+    sweeps (~0.2 deg) flips a handful of ray-boundary pixels — the same
+    approximation the production CMAX path uses.
+    """
+    def py_fn():
+        _native.IMPLEMENTED = set()          # pure-NumPy end to end
+        try:
+            return fn()
+        finally:
+            _native.IMPLEMENTED = _IMPL
 
-if "vil_column" in _IMPL and _native.HAVE_NATIVE:
-    o = py_vil().filled(0.0); r = rs_vil().filled(0.0)
-    # The native path reuses sweep-0 azimuths (cached geometry); real antenna
-    # jitter between sweeps (~0.2 deg) flips a handful of ray-boundary pixels.
-    # Same approximation the production CMAX path uses — allow <0.005% of px.
-    ok = np.mean(np.abs(o - r) > 1e-2) < 5e-5
-    report("vil", timed(py_vil, 5), (timed(rs_vil, 5), ok))
-else:
-    report("vil", timed(py_vil, 5), None)
+    if kernel in _IMPL and _native.HAVE_NATIVE:
+        o, r = py_fn(), fn()
+        if check is not None:
+            ok = check(o, r)
+        else:
+            a, b = to_arr(o), to_arr(r)
+            ok = (np.mean(np.abs(a - b) > 1e-2) <= frac) if frac else match(a, b)
+        report(name, timed(py_fn, n), (timed(fn, n), ok))
+    else:
+        report(name, timed(py_fn, n), None)
 
-# --- 5. nearest-radar velocity mosaic (stub) -------------------------------
-def py_nearest():
-    return composite.build_composite([PATHS[n] for n in NODES], "VRADH", GB, 0, True)
 
-report("nearest_mosaic", timed(py_nearest),
-       None if "nearest_mosaic" not in _native.IMPLEMENTED else ("todo", None))
+# --- 3. echo tops (full product) ---------------------------------------------
+compare("echo_top",
+        lambda: render.sample_column_to_grid(PATHS["silis"], "ET", GB)[0],
+        "echo_top_sweep", lambda m: m.filled(0.0), frac=5e-5)
 
-# --- 6. velocity dealiasing (stub) -----------------------------------------
+# --- 4. VIL (full product) -----------------------------------------------------
+compare("vil",
+        lambda: render.sample_column_to_grid(PATHS["silis"], "VIL", GB)[0],
+        "vil_column", lambda m: m.filled(0.0), frac=5e-5)
+
+# --- 5. nearest-radar velocity mosaic ----------------------------------------
+compare("nearest_mosaic",
+        lambda: composite.build_composite(
+            [PATHS[n] for n in NODES], "VRADH", GB, 0, True),
+        "nearest_mosaic", lambda m: m.filled(0.0), frac=5e-5)
+
+# --- 6. velocity dealiasing ---------------------------------------------------
 vel_sweep = render.odim.read_sweep(PATHS["silis"], "VRADH", 0)
 nyq = odim.sweep_geometry(PATHS["silis"], 0).nyquist or 8.0
+compare("dealias", lambda: process.dealias(vel_sweep, nyq),
+        "dealias_rays", lambda m: m.filled(np.nan))
 
-def py_dealias():
-    return process.dealias(vel_sweep, nyq)
-
-report("dealias", timed(py_dealias),
-       None if "dealias_rays" not in _native.IMPLEMENTED else ("todo", None))
-
-# --- 7. dual-Doppler wind (stub) -------------------------------------------
-def py_dd():
+# --- 7. dual-Doppler wind ------------------------------------------------------
+def _dd():
     v1, _ = render.sample_to_grid(PATHS["silis"], "VRADH", GB, 0)
     v2, _ = render.sample_to_grid(PATHS["sipas"], "VRADH", GB, 0)
     s1, s2 = config.NODES["silis"], config.NODES["sipas"]
     return analysis.dual_doppler(v1, v2, (s1.lat, s1.lon), (s2.lat, s2.lon), GB)
 
-report("dual_doppler", timed(py_dd, 3),
-       None if "dual_doppler" not in _native.IMPLEMENTED else ("todo", None))
+compare("dual_doppler", _dd, "dual_doppler",
+        lambda t: t[0].filled(0.0), n=3)
 
-# --- 8. storm motion (stub) ------------------------------------------------
+# --- 8. storm motion ------------------------------------------------------------
 prev, _ = render.sample_cmax_to_grid(PATHS["silis"], "DBZH", GB)
 curr, _ = render.sample_cmax_to_grid(PATHS["sipas"], "DBZH", GB)
-
-def py_motion():
-    return analysis.motion_field(prev, curr, GB, 300.0)
-
-report("motion_ssd", timed(py_motion, 3),
-       None if "motion_ssd" not in _native.IMPLEMENTED else ("todo", None))
+compare("motion_ssd", lambda: analysis.motion_field(prev, curr, GB, 300.0),
+        "motion_ssd", None, n=3, check=lambda o, r: o == r)
 
 print(f"\nnative lib loaded: {_native.HAVE_NATIVE}   implemented: "
       f"{sorted(_native.IMPLEMENTED)}")

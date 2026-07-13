@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _native
+
 
 # Marshall-Palmer Z-R: Z = a * R^b  ->  R = (z_lin / a)^(1/b).
 # Hail cap limits absurd rates from hail-contaminated high reflectivity.
@@ -104,6 +106,11 @@ def dealias(velocity: np.ma.MaskedArray, nyquist: float) -> np.ma.MaskedArray:
     vn2 = 2.0 * nyquist
     data = np.ma.getdata(velocity).astype(np.float64)
     mask = np.ma.getmaskarray(velocity)
+
+    if _native.HAVE_NATIVE and "dealias_rays" in _native.IMPLEMENTED:
+        buf = np.ascontiguousarray(np.ma.filled(velocity, np.nan), np.float32)
+        if _native.dealias_rays(buf, nyquist):
+            return np.ma.array(buf.astype(np.float64), mask=mask)
     out = data.copy()
 
     for ray in range(data.shape[0]):

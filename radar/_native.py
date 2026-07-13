@@ -73,9 +73,9 @@ def sample_sweep(ray_flat, dist_flat, polar, edges, out) -> bool:
         _p(polar, _F32), polar.shape[1], _p(edges, _F64), _p(out, _F32)) == 0
 
 
-# --- column products (stubs until written) --------------------------------
+# --- column products -------------------------------------------------------
 def echo_top_sweep(ray_flat, dist_flat, polar, edges, heights_bin, thr, et) -> bool:
-    if _lib is None:
+    if _lib is None or not hasattr(_lib, "echo_top_sweep"):
         return False
     return _lib.echo_top_sweep(
         ray_flat.size, _p(ray_flat, _I32), _p(dist_flat, _F32),
@@ -101,9 +101,9 @@ def vil_column(dbz_stack, height_stack, vil) -> bool:
                            _p(height_stack, _F32), _p(vil, _F32)) == 0
 
 
-# --- velocity (stubs) ------------------------------------------------------
+# --- velocity ----------------------------------------------------------------
 def nearest_mosaic(values, dists, out) -> bool:
-    if _lib is None:
+    if _lib is None or not hasattr(_lib, "nearest_mosaic"):
         return False
     nradar, npix = values.shape
     return _lib.nearest_mosaic(npix, nradar, _p(values, _F32),
@@ -111,19 +111,36 @@ def nearest_mosaic(values, dists, out) -> bool:
 
 
 def dealias_rays(vel, nyquist) -> bool:
-    if _lib is None:
+    if _lib is None or not hasattr(_lib, "dealias_rays"):
         return False
     nrays, nbins = vel.shape
     return _lib.dealias_rays(nrays, nbins, _p(vel, _F32), float(nyquist)) == 0
 
 
-# --- analysis (stubs) ------------------------------------------------------
+# --- analysis ------------------------------------------------------------
 def dual_doppler(v1, v2, az1, az2, min_cross_deg, u, v, speed) -> bool:
-    if _lib is None:
+    if _lib is None or not hasattr(_lib, "dual_doppler"):
         return False
     return _lib.dual_doppler(
         v1.size, _p(v1, _F32), _p(v2, _F32), _p(az1, _F32), _p(az2, _F32),
         float(min_cross_deg), _p(u, _F32), _p(v, _F32), _p(speed, _F32)) == 0
 
 
-IMPLEMENTED = {"cmax_sweep", "sample_sweep", "vil_column"}  # rest: NOT_IMPLEMENTED
+def motion_ssd(prev, curr, block, search, step, min_dbz,
+               cx, cy, dx, dy) -> int:
+    """Returns the vector count (>= 0) or -1 if the kernel is unavailable."""
+    if _lib is None or not hasattr(_lib, "motion_ssd"):
+        return -1
+    h, w = curr.shape
+    return _lib.motion_ssd(
+        h, w, _p(prev, _F32), _p(curr, _F32), int(block), int(search),
+        int(step), float(min_dbz), _p(cx, _I32), _p(cy, _I32),
+        _p(dx, _F32), _p(dy, _F32), cx.size)
+
+
+IMPLEMENTED = {
+    "cmax_sweep", "sample_sweep",
+    "echo_top_sweep", "vil_column",
+    "nearest_mosaic", "dealias_rays",
+    "dual_doppler", "motion_ssd",
+}

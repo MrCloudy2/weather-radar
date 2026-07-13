@@ -15,7 +15,26 @@ import math
 
 import numpy as np
 
-from . import geo
+from . import _native, geo
+
+
+# Bearing field from a fixed site to every grid pixel is constant, cache it
+# (mirrors render._GEOM_CACHE; sites x grids is a handful of entries).
+_AZ_CACHE: dict = {}
+
+
+def _bearings_f32(site: tuple[float, float], grid) -> np.ndarray:
+    key = (round(site[0], 4), round(site[1], 4),
+           grid.west, grid.south, grid.east, grid.north, grid.width)
+    hit = _AZ_CACHE.get(key)
+    if hit is None:
+        lon, lat = grid.lonlat()
+        _, az = geo.haversine_bearing(site[0], site[1], lat, lon)
+        hit = np.ascontiguousarray(az, np.float32)
+        if len(_AZ_CACHE) > 8:
+            _AZ_CACHE.clear()
+        _AZ_CACHE[key] = hit
+    return hit
 
 
 def _mpp(grid) -> tuple[float, float]:
@@ -50,12 +69,34 @@ def motion_field(prev: np.ma.MaskedArray, curr: np.ma.MaskedArray, grid,
     Returns one vector per echo block: geographic centre + wind-style u/v (m/s)
     and speed/heading of the echo motion.
     """
-    a = np.ma.filled(prev, 0.0).astype(np.float32)
-    b = np.ma.filled(curr, 0.0).astype(np.float32)
+    a = np.ascontiguousarray(np.ma.filled(prev, 0.0), np.float32)
+    b = np.ascontiguousarray(np.ma.filled(curr, 0.0), np.float32)
     H, W = a.shape
     lon, lat = grid.lonlat()
     mpp_x, mpp_y = _mpp(grid)
     out: list[dict] = []
+
+    if _native.HAVE_NATIVE and "motion_ssd" in _native.IMPLEMENTED:
+        cap = ((H // block) + 1) * ((W // block) + 1)
+        cx = np.empty(cap, np.int32)
+        cy = np.empty(cap, np.int32)
+        dxs = np.empty(cap, np.float32)
+        dys = np.empty(cap, np.float32)
+        cnt = _native.motion_ssd(a, b, block, search, step, min_dbz,
+                                 cx, cy, dxs, dys)
+        if cnt >= 0:
+            for i in range(cnt):
+                u = -float(dxs[i]) * mpp_x / dt_seconds
+                v = float(dys[i]) * mpp_y / dt_seconds
+                speed = math.hypot(u, v)
+                heading = (math.degrees(math.atan2(u, v)) + 360) % 360
+                out.append({
+                    "lat": round(float(lat[cy[i], cx[i]]), 4),
+                    "lon": round(float(lon[cy[i], cx[i]]), 4),
+                    "u": round(u, 2), "v": round(v, 2),
+                    "speed": round(speed, 1), "heading": round(heading),
+                })
+            return out
     for by in range(0, H - block, block):
         for bx in range(0, W - block, block):
             patch = b[by:by + block, bx:bx + block]
@@ -128,6 +169,21 @@ def dual_doppler(v1: np.ma.MaskedArray, v2: np.ma.MaskedArray,
     where the beams cross at a healthy angle (else the inversion is unstable).
     Returns (speed [m/s] masked, u masked, v masked).
     """
+    if _native.HAVE_NATIVE and "dual_doppler" in _native.IMPLEMENTED:
+        shape = v1.shape
+        f1 = np.ascontiguousarray(np.ma.filled(v1, np.nan), np.float32).ravel()
+        f2 = np.ascontiguousarray(np.ma.filled(v2, np.nan), np.float32).ravel()
+        z1 = _bearings_f32(site1, grid).ravel()
+        z2 = _bearings_f32(site2, grid).ravel()
+        u = np.empty(f1.size, np.float32)
+        v = np.empty(f1.size, np.float32)
+        sp = np.empty(f1.size, np.float32)
+        if _native.dual_doppler(f1, f2, z1, z2, min_cross_deg, u, v, sp):
+            def mk(arr):
+                arr = arr.reshape(shape).astype(np.float64)
+                return np.ma.array(np.nan_to_num(arr), mask=np.isnan(arr))
+            return mk(sp), mk(u), mk(v)
+
     lon, lat = grid.lonlat()
     _, az1 = geo.haversine_bearing(site1[0], site1[1], lat, lon)
     _, az2 = geo.haversine_bearing(site2[0], site2[1], lat, lon)

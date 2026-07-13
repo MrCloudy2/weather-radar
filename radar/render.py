@@ -210,6 +210,18 @@ def sample_to_grid(
     vol = odim.summarize(path)
     geom = odim.sweep_geometry(path, sweep_index)
     data = prepare_sweep(path, quantity, sweep_index, dealias, gate_clutter)
+
+    # Native path: cached per-radar geometry + Rust bin-search/gather.
+    if _native.HAVE_NATIVE and "sample_sweep" in _native.IMPLEMENTED:
+        dist_f, ray_idx = _radar_grid_geom(vol, grid, geom)
+        polar = np.ascontiguousarray(np.ma.filled(data, np.nan), np.float32)
+        out = np.empty(dist_f.size, np.float32)
+        if _native.sample_sweep(np.ascontiguousarray(ray_idx.ravel()),
+                                np.ascontiguousarray(dist_f.ravel()),
+                                polar, _bin_edges(geom), out):
+            out = out.reshape(grid.height, grid.width).astype(np.float64)
+            return np.ma.array(np.nan_to_num(out), mask=np.isnan(out)), dist_f
+
     lon, lat = grid.lonlat()
     dist, bearing = geo.haversine_bearing(vol.site_lat, vol.site_lon, lat, lon)
     values = _polar_lookup(data, geom, dist, bearing)
@@ -311,18 +323,22 @@ def sample_column_to_grid(
     vol = odim.summarize(path)
     shape = (grid.height, grid.width)
 
-    # Native VIL path: cached per-radar geometry + fused Rust gather/integrate
-    # (skips _lookup_indices' per-sweep azimuth matching + searchsorted).
-    if (product == "VIL" and _native.HAVE_NATIVE
-            and "vil_column" in _native.IMPLEMENTED):
+    # Native column path (ET + VIL): cached per-radar geometry + fused Rust
+    # per-sweep kernels (skips _lookup_indices' azimuth matching + searchsorted).
+    kernel = "echo_top_sweep" if product == "ET" else "vil_column"
+    if _native.HAVE_NATIVE and kernel in _native.IMPLEMENTED:
         geom0 = odim.sweep_geometry(path, vol.sweeps[0].index)
         dist_f, ray_idx = _radar_grid_geom(vol, grid, geom0)
         dist_flat = np.ascontiguousarray(dist_f.ravel())
         ray_flat = np.ascontiguousarray(ray_idx.ravel())
         npix = dist_flat.size
         n = len(vol.sweeps)
-        Z32 = np.empty((n, npix), np.float32)
-        H32 = np.empty((n, npix), np.float32)
+        is_vil = product != "ET"
+        if is_vil:
+            Z32 = np.empty((n, npix), np.float32)
+            H32 = np.empty((n, npix), np.float32)
+        else:
+            et = np.full(npix, np.nan, np.float32)
         ok = True
         for i, s in enumerate(vol.sweeps):
             data = prepare_sweep(path, "DBZH", s.index)
@@ -333,14 +349,26 @@ def sample_column_to_grid(
                 np.sqrt(r * r + geo.A_E**2 + 2 * r * geo.A_E
                         * np.sin(geom.elangle_rad))
                 - geo.A_E + vol.site_height_m, np.float32)
-            ok = ok and _native.vil_gather_sweep(
-                ray_flat, dist_flat, polar, _bin_edges(geom), h_bin,
-                Z32[i], H32[i])
-        out = np.empty(npix, np.float32)
-        if ok and _native.vil_column(Z32, H32, out):
-            out = out.reshape(shape).astype(np.float64)
-            valid = np.isfinite(out)
-            return np.ma.array(np.where(valid, out, 0.0), mask=~valid), dist_f
+            edges = _bin_edges(geom)
+            if is_vil:
+                ok = ok and _native.vil_gather_sweep(
+                    ray_flat, dist_flat, polar, edges, h_bin, Z32[i], H32[i])
+            else:
+                ok = ok and _native.echo_top_sweep(
+                    ray_flat, dist_flat, polar, edges, h_bin,
+                    ECHO_TOP_DBZ, et)
+        if ok and not is_vil:
+            et = et.reshape(shape).astype(np.float64)
+            valid = np.isfinite(et)
+            return np.ma.array(np.where(valid, et / 1000.0, 0.0),
+                               mask=~valid), dist_f
+        if is_vil:
+            out = np.empty(npix, np.float32)
+            if ok and _native.vil_column(Z32, H32, out):
+                out = out.reshape(shape).astype(np.float64)
+                valid = np.isfinite(out)
+                return np.ma.array(np.where(valid, out, 0.0),
+                                   mask=~valid), dist_f
 
     lon, lat = grid.lonlat()
     dist, bearing = geo.haversine_bearing(vol.site_lat, vol.site_lon, lat, lon)

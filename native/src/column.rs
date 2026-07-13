@@ -1,4 +1,4 @@
-//! Vertical-column products: echo tops (STUB) + VIL (implemented).
+//! Vertical-column products: echo tops + VIL.
 //!
 //! Python reference: `radar/render.py` `sample_column_to_grid`.
 
@@ -7,29 +7,42 @@ use crate::NOT_IMPLEMENTED;
 /// Echo-top accumulation for ONE sweep into `et` (metres). NaN-initialise `et`,
 /// call per sweep; result = highest beam altitude with reflectivity >= `thr`.
 ///
-/// TODO(implement): for each pixel `p`
-///   * `bin = find_bin(edges, nbins, dist[p])`; skip if < 0
-///   * `z = data[ray_idx[p]*nbins + bin]`; skip if NaN or `z < thr`
-///   * `h = heights_bin[bin]` (beam height for this sweep's bins, precomputed
-///     in Python from slant range + elevation + site height)
-///   * `if et[p].is_nan() || h > et[p] { et[p] = h }`
-/// Return `OK`.
+/// Mirrors the "ET" branch of `render.sample_column_to_grid`: only in-range
+/// gates with `z >= thr` contribute their beam height; the running max across
+/// sweeps is kept in `et` (NaN = no echo top yet).
 ///
 /// # Safety
 /// Pointers valid for the stated lengths.
 #[no_mangle]
 pub unsafe extern "C" fn echo_top_sweep(
-    _npix: i32,
-    _ray_idx: *const i32,
-    _dist: *const f32,
-    _data: *const f32,   // [nrays*nbins]
-    _nbins: i32,
-    _edges: *const f64,  // [nbins+1]
-    _heights_bin: *const f32, // [nbins] beam height per bin (metres)
-    _thr: f32,           // echo-top reflectivity threshold (e.g. 18 dBZ)
-    _et: *mut f32,       // [npix], in/out (metres, NaN = none)
+    npix: i32,
+    ray_idx: *const i32,
+    dist: *const f32,
+    data: *const f32,   // [nrays*nbins], NaN = invalid gate
+    nbins: i32,
+    edges: *const f64,  // [nbins+1]
+    heights_bin: *const f32, // [nbins] beam height per bin (metres)
+    thr: f32,           // echo-top reflectivity threshold (e.g. 18 dBZ)
+    et: *mut f32,       // [npix], in/out (metres, NaN = none)
 ) -> i32 {
-    NOT_IMPLEMENTED
+    let npix = npix as usize;
+    let nb = nbins as usize;
+    for p in 0..npix {
+        let bin = crate::grid::find_bin(edges, nbins, *dist.add(p) as f64);
+        if bin < 0 {
+            continue;
+        }
+        let z = *data.add(*ray_idx.add(p) as usize * nb + bin as usize);
+        if z != z || z < thr {
+            continue;
+        }
+        let h = *heights_bin.add(bin as usize);
+        let cur = *et.add(p);
+        if cur != cur || h > cur {
+            *et.add(p) = h;
+        }
+    }
+    crate::OK
 }
 
 /// Gather ONE sweep's per-pixel reflectivity + beam height for the VIL stack.
