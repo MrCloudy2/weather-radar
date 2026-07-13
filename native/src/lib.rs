@@ -13,9 +13,9 @@
 //!   * `edges[nbins+1]` (f64) are monotonic ground-range bin edges
 //!   * outputs use NaN for "no value".
 //!
-//! STATUS: `reflectivity` implemented; the rest are specified stubs to be
-//! written next (each doc-comment states the exact algorithm + the Python
-//! reference in `radar/`).
+//! STATUS: `reflectivity` + VIL (`vil_gather_sweep`, `vil_column`) implemented;
+//! the rest are specified stubs to be written next (each doc-comment states
+//! the exact algorithm + the Python reference in `radar/`).
 
 pub mod grid;
 pub mod reflectivity;

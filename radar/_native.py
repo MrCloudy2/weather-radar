@@ -23,6 +23,7 @@ _SIGS = {
     "cmax_sweep":     [_c32, _I32, _F32, _F32, _c32, _F64, _F32],
     "sample_sweep":   [_c32, _I32, _F32, _F32, _c32, _F64, _F32],
     "echo_top_sweep": [_c32, _I32, _F32, _F32, _c32, _F64, _F32, _cf, _F32],
+    "vil_gather_sweep": [_c32, _I32, _F32, _F32, _c32, _F64, _F32, _F32, _F32],
     "vil_column":     [_c32, _c32, _F32, _F32, _F32],
     "nearest_mosaic": [_c32, _c32, _F32, _F32, _F32],
     "dealias_rays":   [_c32, _c32, _F32, _cf],
@@ -82,8 +83,18 @@ def echo_top_sweep(ray_flat, dist_flat, polar, edges, heights_bin, thr, et) -> b
         _p(heights_bin, _F32), float(thr), _p(et, _F32)) == 0
 
 
+def vil_gather_sweep(ray_flat, dist_flat, polar, edges, heights_bin,
+                     z_out, h_out) -> bool:
+    if _lib is None or not hasattr(_lib, "vil_gather_sweep"):
+        return False
+    return _lib.vil_gather_sweep(
+        ray_flat.size, _p(ray_flat, _I32), _p(dist_flat, _F32),
+        _p(polar, _F32), polar.shape[1], _p(edges, _F64),
+        _p(heights_bin, _F32), _p(z_out, _F32), _p(h_out, _F32)) == 0
+
+
 def vil_column(dbz_stack, height_stack, vil) -> bool:
-    if _lib is None:
+    if _lib is None or not hasattr(_lib, "vil_column"):
         return False
     nsweeps, npix = dbz_stack.shape
     return _lib.vil_column(npix, nsweeps, _p(dbz_stack, _F32),
@@ -115,4 +126,4 @@ def dual_doppler(v1, v2, az1, az2, min_cross_deg, u, v, speed) -> bool:
         float(min_cross_deg), _p(u, _F32), _p(v, _F32), _p(speed, _F32)) == 0
 
 
-IMPLEMENTED = {"cmax_sweep", "sample_sweep"}   # the rest return NOT_IMPLEMENTED
+IMPLEMENTED = {"cmax_sweep", "sample_sweep", "vil_column"}  # rest: NOT_IMPLEMENTED

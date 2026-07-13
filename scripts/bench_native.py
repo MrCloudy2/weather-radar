@@ -146,11 +146,28 @@ def rs_et():
 
 report("echo_top", timed(py_et), (timed(lambda: rs_et()), None) if rs_et()[1] else None)
 
-# --- 4. VIL (column, stub) -------------------------------------------------
+# --- 4. VIL (full product, NumPy vs native kernel) ---------------------------
+_IMPL = _native.IMPLEMENTED
+
 def py_vil():
+    _native.IMPLEMENTED = _IMPL - {"vil_column"}      # force the NumPy path
+    try:
+        return render.sample_column_to_grid(PATHS["silis"], "VIL", GB)[0]
+    finally:
+        _native.IMPLEMENTED = _IMPL
+
+def rs_vil():
     return render.sample_column_to_grid(PATHS["silis"], "VIL", GB)[0]
 
-report("vil", timed(py_vil), None if "vil_column" not in _native.IMPLEMENTED else ("todo", None))
+if "vil_column" in _IMPL and _native.HAVE_NATIVE:
+    o = py_vil().filled(0.0); r = rs_vil().filled(0.0)
+    # The native path reuses sweep-0 azimuths (cached geometry); real antenna
+    # jitter between sweeps (~0.2 deg) flips a handful of ray-boundary pixels.
+    # Same approximation the production CMAX path uses — allow <0.005% of px.
+    ok = np.mean(np.abs(o - r) > 1e-2) < 5e-5
+    report("vil", timed(py_vil, 5), (timed(rs_vil, 5), ok))
+else:
+    report("vil", timed(py_vil, 5), None)
 
 # --- 5. nearest-radar velocity mosaic (stub) -------------------------------
 def py_nearest():
