@@ -47,6 +47,11 @@ NODES: dict[str, Node] = {
 # back automatically if republished -- the timeline falls back to a live node.)
 ACTIVE_NODES = ["silis", "sipas", "hrpun", "hrbil", "hrgol"]
 
+# Blend the EUMETNET OPERA European composite (1 km column-max reflectivity,
+# includes silis/sipas) into composite CMAX reflectivity / rain rate. Fills
+# Slovenia while ARSO's raw volumes are missing from the feed. See opera.py.
+OPERA_FILL = True
+
 # Two Web Mercator output grids:
 #  * BASE  — Slovenia-focused; used by all the heavier products (velocity, VIL,
 #    echo tops, etc.) so their render cost/memory stay bounded.

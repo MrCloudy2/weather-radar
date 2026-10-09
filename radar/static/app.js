@@ -111,7 +111,8 @@ function buildPanel(el, cfg) {
   });
   L.tileLayer(BASE_TILES, {
     maxZoom: 12, className: 'basemap',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      + ' · Radar: EUMETNET OPERA, ARSO, DHMZ',
   }).addTo(map);
   const overlay = L.imageOverlay('', state.gridBounds,
     { opacity: 0.85, className: 'radar-overlay', interactive: false }).addTo(map);
@@ -363,7 +364,7 @@ async function queryValue(panel, latlng, readout) {
     if (!d.in_range) { readout.innerHTML = 'out of range'; return; }
     const parts = [d.value === null ? '—' : `<b>${d.value} ${d.units || ''}</b>`];
     if (d.beam_height_m != null) parts.push(`${d.beam_height_m} m`);
-    if (d.source) parts.push(d.source);
+    if (d.source) parts.push(d.source === 'opera' ? 'OPERA composite' : d.source);
     readout.innerHTML = parts.join(' · ');
   } catch (e) { /* aborted */ }
 }
@@ -485,4 +486,21 @@ function throttle(fn, ms) {
   };
 }
 
+/* ---------- auto-reload on deploy ---------- */
+// The server stamps its build hash into <meta name="build">; when /version
+// reports a different one, a new version was deployed -> full reload.
+function watchForUpdates() {
+  const mine = document.querySelector('meta[name="build"]')?.content;
+  if (!mine) return;
+  const check = () => fetch(`${API}/version`, { cache: 'no-store' })
+    .then(r => r.json())
+    .then(v => { if (v.build && v.build !== mine) location.reload(); })
+    .catch(() => {});                 // server restarting: try again later
+  setInterval(check, 60_000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') check();
+  });
+}
+
 boot();
+watchForUpdates();

@@ -19,12 +19,13 @@ from pathlib import Path
 
 import numpy as np
 
-from . import analysis, composite, config, fetcher, render
+from . import analysis, composite, config, fetcher, opera, render
 
 WINDOW = timedelta(minutes=90)
 POLL_SECONDS = 60
 RENDER_CACHE_MAX = 512
 NEAREST_TOL = timedelta(minutes=6)   # max gap when matching radars in a composite
+OPERA_WAIT = timedelta(minutes=15)   # hold archiving a frame this long for OPERA
 GRID = config.BASE_GRID          # default (velocity / heavy / analysis products)
 ARCHIVE = timedelta(hours=config.ARCHIVE_HOURS)
 # At most this many renders run at once, so a burst of requests (or the eager
@@ -47,6 +48,8 @@ class Store:
         }
         self._render_cache: "OrderedDict[tuple, render.RenderResult]" = OrderedDict()
         self._lock = threading.Lock()
+        # OPERA European composite frames: key -> (time, path).
+        self._opera: "OrderedDict[str, tuple[datetime, Path]]" = OrderedDict()
 
     # --- frame access -----------------------------------------------------
     def frames(self, node: str) -> list[Frame]:
@@ -70,6 +73,47 @@ class Store:
                 best, best_gap = f, gap
         return best
 
+    def ref_node(self, nodes: list[str]) -> str:
+        """First of `nodes` that currently has frames (radars drop out)."""
+        return next((n for n in nodes if self.frames(n)), nodes[0])
+
+    # --- OPERA composite fallback -------------------------------------------
+    def opera_near(self, target: datetime) -> tuple[datetime, Path] | None:
+        if not config.OPERA_FILL:
+            return None
+        with self._lock:
+            files = dict(self._opera)
+        return opera.nearest(files, target, NEAREST_TOL)
+
+    def _opera_fill(self, target: datetime, quantity: str, use_cmax: bool,
+                    grid) -> tuple[np.ndarray | None, str | None]:
+        """(dBZ field on `grid`, frame key) for CMAX reflectivity products."""
+        if not (use_cmax and quantity in composite.CMAX_MOMENTS):
+            return None, None
+        hit = self.opera_near(target)
+        if hit is None:
+            return None, None
+        return opera.dbz_grid(hit[1], grid), hit[0].strftime("%Y%m%dT%H%M")
+
+    def _fetch_opera(self) -> int:
+        now = datetime.now(timezone.utc)
+        cands: list[opera.OperaFile] = []
+        for off in (0, 1):
+            cands += opera.list_files(now - timedelta(days=off))
+        with self._lock:
+            have = set(self._opera)
+        added = 0
+        for of in cands:
+            key = of.time.strftime("%Y%m%dT%H%M%S")
+            if of.time < now - WINDOW or key in have:
+                continue
+            path = opera.download(of)
+            with self._lock:
+                self._opera[key] = (of.time, path)
+                self._opera = OrderedDict(sorted(self._opera.items()))
+            added += 1
+        return added
+
     def _add(self, node: str, rf: fetcher.RadarFile, path: Path) -> None:
         key = rf.time.strftime("%Y%m%dT%H%M%S")
         with self._lock:
@@ -86,6 +130,12 @@ class Store:
                         fr.path.unlink(missing_ok=True)
                     except OSError:
                         pass
+            for key in [k for k, (t, _) in self._opera.items() if t < cutoff]:
+                _, p = self._opera.pop(key)
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     # --- rendering --------------------------------------------------------
     def _cached(self, key, produce):
@@ -152,18 +202,22 @@ class Store:
             fr = self.frame_near(n, target)
             if fr is not None:
                 paths.append(fr.path)
-        if not paths:
-            return None
         is_column = quantity in composite.COLUMN_PRODUCTS
         grid = config.grid_for(quantity)      # reflectivity -> wide, else base
+        fill, okey = self._opera_fill(target, quantity, use_cmax, grid)
+        if not paths and fill is None:
+            return None
         mode = "col" if is_column else ("cmax" if use_cmax else sweep)
-        ck = ("comp", tuple(sorted(nodes)), key, quantity, mode, dealias)
+        # The OPERA key is part of the cache key: it lands ~4 min after the
+        # radars, and a render made before it arrived must not stick.
+        ck = ("comp", tuple(sorted(nodes)), key, quantity, mode, dealias, okey)
         try:
             return self._cached(
                 ck,
                 lambda: render.render_grid(
                     composite.build_composite(
-                        paths, quantity, grid, sweep, dealias, cmax=use_cmax
+                        paths, quantity, grid, sweep, dealias, cmax=use_cmax,
+                        fill_dbz=fill,
                     ),
                     quantity, grid,
                 ),
@@ -218,8 +272,15 @@ class Store:
             for f in self.frames(n):
                 seen.add(f.time.strftime("%Y%m%dT%H%M%S"))
         made = 0
+        wait_until = datetime.now(timezone.utc) - OPERA_WAIT
         for key in sorted(seen):
             if self._archive_path(key).exists():
+                continue
+            t = _parse_key(key)
+            # Archived PNGs are permanent: give the OPERA composite (which lands
+            # a few minutes after the radars) a chance before freezing a frame.
+            if (config.OPERA_FILL and t is not None and t > wait_until
+                    and self.opera_near(t) is None):
                 continue
             res = self.render_composite(
                 list(config.ARCHIVE_NODES), key, config.ARCHIVE_QUANTITY,
@@ -252,11 +313,12 @@ class Store:
             return None
         paths = [fr.path for n in nodes
                  if (fr := self.frame_near(n, target)) is not None]
-        if not paths:
+        fill, _ = self._opera_fill(target, quantity, cmax, GRID)
+        if not paths and fill is None:
             return None
         try:
             return composite.build_composite(paths, quantity, GRID, sweep,
-                                             True, cmax=cmax)
+                                             True, cmax=cmax, fill_dbz=fill)
         except (KeyError, IndexError):
             return None
 
@@ -265,7 +327,8 @@ class Store:
         if target is None:
             return None
         lo = target - timedelta(minutes=window_min)
-        times = [f.time for f in self.frames(nodes[0]) if lo <= f.time <= target]
+        times = [f.time for f in self.frames(self.ref_node(nodes))
+                 if lo <= f.time <= target]
         grids = []
         for t in times:
             g = self._grid_for(nodes, t.strftime("%Y%m%dT%H%M%S"), "RATE")
@@ -277,7 +340,8 @@ class Store:
         target = _parse_key(key)
         if target is None:
             return []
-        ref = self.frame_near(nodes[0], target - timedelta(minutes=lag_min))
+        ref = self.frame_near(self.ref_node(nodes),
+                              target - timedelta(minutes=lag_min))
         if ref is None or abs(ref.time - target) < timedelta(minutes=4):
             return []
         curr = self._grid_for(nodes, key, "DBZH", cmax=True)
@@ -402,6 +466,12 @@ class Store:
             except Exception as exc:
                 result[node] = -1
                 print(f"[store] fetch error for {node}: {exc}")
+        if config.OPERA_FILL:
+            try:
+                result["opera"] = self._fetch_opera()
+            except Exception as exc:
+                result["opera"] = -1
+                print(f"[store] fetch error for opera: {exc}")
         self._prune()
         try:
             self._archived = self._update_archive()   # flagship 24h archive
@@ -427,6 +497,7 @@ async def worker_loop(stop: asyncio.Event) -> None:
         added = await asyncio.to_thread(store.refresh)
         dt = time.perf_counter() - t0
         total = {n: len(store.frames(n)) for n in config.ACTIVE_NODES}
+        total["opera"] = len(store._opera)
         arch = len(store.archive_keys())
         print(f"[store] refresh +{added} in {dt:.1f}s; holding {total}; "
               f"archive={arch} frames", flush=True)

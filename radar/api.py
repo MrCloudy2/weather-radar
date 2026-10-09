@@ -8,6 +8,8 @@ point values for the hover inspector. Static frontend (Phase 3) mounts at /.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -226,10 +228,12 @@ def value(
         return out
     target = store_mod._parse_key(time)
     pairs = store.composite_paths(ids, target) if target else []
-    if not pairs:
+    op = store.opera_near(target) if target else None
+    if not pairs and op is None:
         raise HTTPException(404, "frame not available")
     return composite.composite_value(
-        pairs, quantity, lat, lon, sweep, dealias, cmax=use_cmax
+        pairs, quantity, lat, lon, sweep, dealias, cmax=use_cmax,
+        opera_path=op[1] if op else None,
     )
 
 
@@ -256,6 +260,53 @@ def windvectors(
 
 # Serve the Phase 3 frontend if present.
 _static = Path(__file__).resolve().parent / "static"
+
+
+def _build_id() -> str:
+    """Content hash of the frontend files: changes exactly when a deploy does."""
+    h = hashlib.sha1()
+    for p in sorted(_static.glob("*")):
+        if p.is_file():
+            h.update(p.name.encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()[:12]
+
+
+BUILD_ID = _build_id() if _static.is_dir() else "dev"
+_NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
+
+@app.get("/api/version")
+def version():
+    """Open pages poll this and hard-reload when the build changes."""
+    return Response(content=json.dumps({"build": BUILD_ID}),
+                    media_type="application/json", headers=_NO_CACHE)
+
+
 if _static.is_dir():
+    from fastapi.responses import HTMLResponse
     from fastapi.staticfiles import StaticFiles
-    app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
+
+    _INDEX = (
+        (_static / "index.html").read_text()
+        .replace('href="./style.css"', f'href="./style.css?v={BUILD_ID}"')
+        .replace('src="./app.js"', f'src="./app.js?v={BUILD_ID}"')
+        .replace("<head>", f'<head>\n  <meta name="build" content="{BUILD_ID}" />', 1)
+    )
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/index.html", include_in_schema=False)
+    def index():
+        # Never cache the shell; it pins the versioned asset URLs.
+        return HTMLResponse(_INDEX, headers=_NO_CACHE)
+
+    class _RevalidatingStatic(StaticFiles):
+        """Assets always revalidate (cheap ETag 304s), so a deploy shows up."""
+
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+    app.mount("/", _RevalidatingStatic(directory=str(_static), html=True),
+              name="static")

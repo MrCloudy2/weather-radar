@@ -16,11 +16,24 @@ from pathlib import Path
 
 import numpy as np
 
-from . import _native, geo, render
+from . import _native, colormaps, geo, opera, process, render
 
 COLUMN_PRODUCTS = {"ET", "VIL"}                        # vertical, all-tilt
 CMAX_MOMENTS = {"DBZH", "TH", "RATE"}                  # support the CMAX toggle
 MAX_MOMENTS = {"DBZH", "TH", "RATE", "ET", "VIL"}      # combine by max across radars
+
+
+def _dbz_as(dbz: np.ndarray, quantity: str) -> np.ndarray:
+    """A dBZ field expressed as `quantity` (dBZ as-is, or Marshall-Palmer rate).
+
+    Applies the same <5 dBZ clutter floor as render.prepare_sweep.
+    """
+    with np.errstate(invalid="ignore"):
+        dbz = np.where(dbz >= 5.0, dbz, np.float32(np.nan)).astype(np.float32)
+        if quantity != "RATE":
+            return dbz
+        z = np.power(10.0, np.minimum(dbz, process.HAIL_CAP_DBZ) / 10.0)
+        return np.power(z / process.ZR_A, 1.0 / process.ZR_B).astype(np.float32)
 
 
 def build_composite(
@@ -30,11 +43,15 @@ def build_composite(
     sweep_index: int = 0,
     dealias: bool = True,
     cmax: bool = False,
+    fill_dbz: np.ndarray | None = None,
 ) -> np.ma.MaskedArray:
     """Combine several radars into one gridded field.
 
     - Column products (ET/VIL) and cmax reflectivity use all tilts per radar.
     - MAX_MOMENTS combine by max across radars; others by nearest-radar mosaic.
+    - `fill_dbz` (float32 dBZ on `grid`, NaN = none; e.g. the OPERA composite)
+      gap-fills pixels no radar covers, for reflectivity-family products only.
+      Never modified in place (it is cached by the caller).
     """
     is_column = quantity in COLUMN_PRODUCTS
     use_cmax = cmax and quantity in CMAX_MOMENTS
@@ -58,6 +75,15 @@ def build_composite(
                 continue
             arr = np.ma.filled(v, np.nan).astype(np.float32, copy=False)
             best = arr if best is None else np.fmax(best, arr, out=best)
+        if fill_dbz is not None and quantity in CMAX_MOMENTS:
+            # Gap-fill only: OPERA runs 5-10 dBZ hotter than our processed
+            # radars where both see echo, so it must not override them.
+            extra = _dbz_as(fill_dbz, quantity)
+            if best is None:
+                best = extra
+            else:
+                gap = np.isnan(best)
+                best[gap] = extra[gap]
         if best is None:
             return np.ma.array(np.zeros(shape, np.float32), mask=np.ones(shape, bool))
         return np.ma.array(np.nan_to_num(best), mask=np.isnan(best))
@@ -102,8 +128,13 @@ def composite_value(
     sweep_index: int = 0,
     dealias: bool = True,
     cmax: bool = False,
+    opera_path: Path | None = None,
 ) -> dict:
-    """Point value for a composite (max for reflectivity, nearest for velocity)."""
+    """Point value for a composite (max for reflectivity, nearest for velocity).
+
+    With `opera_path`, the OPERA composite answers for CMAX reflectivity
+    products where no radar has a value, matching build_composite's gap-fill.
+    """
     is_column = quantity in COLUMN_PRODUCTS
     use_cmax = cmax and quantity in CMAX_MOMENTS
     results = []
@@ -119,6 +150,14 @@ def composite_value(
             continue
         s["node"] = node
         results.append(s)
+    if (opera_path is not None and use_cmax
+            and not any(r.get("value") is not None for r in results)):
+        dbz = opera.point_dbz(opera_path, lat, lon)
+        if dbz is not None and dbz >= 5.0:
+            val = float(_dbz_as(np.array([dbz], np.float32), quantity)[0])
+            results.append({"value": round(val, 1), "in_range": True,
+                            "range_km": None, "node": "opera",
+                            "units": colormaps.UNITS.get(quantity, "")})
     if not results:
         return {"value": None, "in_range": False, "source": None}
     valid = [r for r in results if r.get("value") is not None]
