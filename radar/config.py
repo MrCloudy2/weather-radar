@@ -35,6 +35,7 @@ NODES: dict[str, Node] = {
     "sipas": Node("sipas", "Pasja Ravan", "SI", 46.099, 14.234, True),
     "hrpun": Node("hrpun", "Puntijarka",  "HR", 45.908, 15.968, True),
     "hrbil": Node("hrbil", "Bilogora",    "HR", 45.884, 17.200, True),
+    "hrgol": Node("hrgol", "Goli",        "HR", 45.020, 14.122, True),
     "hrdeb": Node("hrdeb", "Debeljak",    "HR", 44.045, 15.376, False),
     "hrgra": Node("hrgra", "Gradiste",    "HR", 45.159, 18.703, False),
     "hrulj": Node("hrulj", "Uljenje",     "HR", 42.894, 17.478, False),
@@ -42,7 +43,9 @@ NODES: dict[str, Node] = {
 
 # Nodes the worker actively fetches + keeps history for. Keep this to the ones
 # that actually cover Slovenia so we don't hoard the whole network.
-ACTIVE_NODES = ["silis", "sipas", "hrpun", "hrbil"]
+# (silis/sipas/hrpun absent from the ORD feed since ~Oct 2026; kept so they come
+# back automatically if republished -- the timeline falls back to a live node.)
+ACTIVE_NODES = ["silis", "sipas", "hrpun", "hrbil", "hrgol"]
 
 # Two Web Mercator output grids:
 #  * BASE  — Slovenia-focused; used by all the heavier products (velocity, VIL,

@@ -27,7 +27,10 @@ const CMAXABLE = new Set(['DBZH', 'TH', 'RATE']); // support the CMAX tilt optio
 const SCALAR_ANALYSIS = new Set(['ACCUM', 'NOWCAST', 'WIND']); // PNG field, no tilt
 const ARROW = new Set(['MOTION', 'WIND']);        // draw vector arrows
 const NOTILT = new Set([...COLUMN, ...SCALAR_ANALYSIS, 'MOTION']);
-const DARK_TILES = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+// CARTO basemaps now require an API key; OSM standard tiles need none (fine
+// for personal traffic under the OSM tile policy). Darkened via CSS filter on
+// .basemap so the radar overlay keeps its true colours.
+const BASE_TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
 const state = {
   layout: 4,
@@ -50,7 +53,7 @@ let syncing = false;
 async function boot() {
   const [src, tl] = await Promise.all([
     fetch(`${API}/sources`).then(r => r.json()),
-    fetch(`${API}/timeline?node=silis`).then(r => r.json()),
+    fetch(`${API}/timeline`).then(r => r.json()),
   ]);
 
   state.gridBounds = src.grid.base_bounds || src.grid.bounds;
@@ -106,9 +109,9 @@ function buildPanel(el, cfg) {
     center: [46.15, 14.95], zoom: 8, zoomControl: false,
     attributionControl: true, preferCanvas: true,
   });
-  L.tileLayer(DARK_TILES, {
-    subdomains: 'abcd', maxZoom: 12,
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
+  L.tileLayer(BASE_TILES, {
+    maxZoom: 12, className: 'basemap',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   }).addTo(map);
   const overlay = L.imageOverlay('', state.gridBounds,
     { opacity: 0.85, className: 'radar-overlay', interactive: false }).addTo(map);

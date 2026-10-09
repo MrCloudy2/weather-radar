@@ -104,6 +104,8 @@ select {
   color: #6b7688 !important; }
 .leaflet-control-attribution a { color: #8b97ab !important; }
 .radar-overlay { image-rendering: pixelated; }
+/* OSM standard tiles turned into a muted dark basemap (radar stays true-colour). */
+.basemap { filter: invert(1) hue-rotate(180deg) brightness(0.8) contrast(0.85) saturate(0.4); }
 .radar-tip {
   background: rgba(11, 14, 19, .85); color: #ffd23f; border: 1px solid #ffd23f;
   border-radius: 4px; font-size: 11px; font-weight: 600; padding: 1px 5px;

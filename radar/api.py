@@ -93,8 +93,16 @@ def sources():
 
 
 @app.get("/api/timeline")
-def timeline(node: str = Query("silis")):
-    """Master timeline (frame keys) driven by a reference node (Slovenian)."""
+def timeline(node: str | None = Query(None)):
+    """Master timeline (frame keys) driven by a reference node.
+
+    Without `node`, use the first active radar that actually has frames
+    (Slovenian first) -- a radar dropping out of the feed must not blank the
+    whole site.
+    """
+    if node is None:
+        node = next((n for n in config.ACTIVE_NODES if store.frames(n)),
+                    config.ACTIVE_NODES[0])
     if node not in config.ACTIVE_NODES:
         raise HTTPException(404, "unknown/inactive node")
     frs = store.frames(node)
