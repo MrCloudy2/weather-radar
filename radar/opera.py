@@ -23,15 +23,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 import h5py
 import numpy as np
 import requests
 
-from . import config, geo
+from . import config, fetcher, geo
 
-_S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 _NAME_RE = re.compile(r"^OPERA@(?P<ts>\d{8}T\d{4})@0@DBZH\.h5$")
 
 
@@ -40,10 +38,11 @@ class OperaFile:
     key: str
     time: datetime
     size: int
+    base: str = config.S3_BASE
 
     @property
     def url(self) -> str:
-        return f"{config.S3_BASE}/{self.key}"
+        return f"{self.base}/{self.key}"
 
     @property
     def filename(self) -> str:
@@ -51,32 +50,25 @@ class OperaFile:
 
 
 def list_files(day: datetime) -> list[OperaFile]:
-    """DBZH composite files for one UTC day, time-sorted."""
-    out: list[OperaFile] = []
-    token = None
-    while True:
-        params = {"list-type": "2", "prefix": f"{day:%Y/%m/%d}/OPERA/COMP/",
-                  "max-keys": "1000"}
-        if token:
-            params["continuation-token"] = token
-        resp = requests.get(f"{config.S3_BASE}/", params=params,
-                            timeout=config.HTTP_TIMEOUT)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-        for c in root.findall(f"{_S3_NS}Contents"):
-            key = c.findtext(f"{_S3_NS}Key", default="")
+    """DBZH composite files for one UTC day, time-sorted, from the first bucket
+    in config.S3_BASES that has any."""
+    prefix = f"{day:%Y/%m/%d}/OPERA/COMP/"
+    for base in config.S3_BASES:
+        try:
+            raw = fetcher.list_raw(base, prefix)
+        except requests.RequestException:
+            continue
+        out = []
+        for key, size in raw:
             m = _NAME_RE.match(key.rsplit("/", 1)[-1])
             if m:
                 t = datetime.strptime(m.group("ts"), "%Y%m%dT%H%M").replace(
                     tzinfo=timezone.utc)
-                out.append(OperaFile(key, t,
-                                     int(c.findtext(f"{_S3_NS}Size", default="0"))))
-        if root.findtext(f"{_S3_NS}IsTruncated") == "true":
-            token = root.findtext(f"{_S3_NS}NextContinuationToken")
-        else:
-            break
-    out.sort(key=lambda f: f.time)
-    return out
+                out.append(OperaFile(key, t, size, base))
+        if out:
+            out.sort(key=lambda f: f.time)
+            return out
+    return []
 
 
 def download(of: OperaFile, dest_dir: Path | None = None) -> Path:

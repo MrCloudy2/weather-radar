@@ -45,10 +45,11 @@ class RadarFile:
     elevations: list[float]     # elevation angles in degrees
     moments: list[str]          # e.g. ["DBZH", "TH", "VRADH"]
     size: int                   # bytes
+    base: str = config.S3_BASE  # bucket URL this file was listed from
 
     @property
     def url(self) -> str:
-        return f"{config.S3_BASE}/{self.key}"
+        return f"{self.base}/{self.key}"
 
     @property
     def filename(self) -> str:
@@ -62,7 +63,7 @@ class RadarFile:
         )
 
 
-def _decode_key(key: str, size: int) -> RadarFile | None:
+def _decode_key(key: str, size: int, base: str = config.S3_BASE) -> RadarFile | None:
     """Turn an S3 key into a RadarFile, or None if it doesn't match schema."""
     parts = key.split("/")
     if len(parts) < 7:
@@ -85,33 +86,51 @@ def _decode_key(key: str, size: int) -> RadarFile | None:
         elevations=elevs,
         moments=moments,
         size=size,
+        base=base,
     )
 
 
 def list_keys(prefix: str) -> list[RadarFile]:
-    """List every decodable ODIM file under an S3 prefix (handles pagination)."""
-    out: list[RadarFile] = []
+    """List every decodable ODIM file under an S3 prefix, from the first bucket
+    in config.S3_BASES that has any (primary may be down / empty)."""
+    last_exc: Exception | None = None
+    for base in config.S3_BASES:
+        try:
+            files = _list_keys_at(base, prefix)
+        except requests.RequestException as exc:
+            last_exc = exc
+            continue
+        if files:
+            return files
+    if last_exc is not None and len(config.S3_BASES) == 1:
+        raise last_exc
+    return []
+
+
+def list_raw(base: str, prefix: str) -> list[tuple[str, int]]:
+    """(key, size) for every object under `prefix` in one bucket (paginated)."""
+    out: list[tuple[str, int]] = []
     token: str | None = None
     while True:
         params = {"list-type": "2", "prefix": prefix, "max-keys": "1000"}
         if token:
             params["continuation-token"] = token
-        resp = requests.get(
-            f"{config.S3_BASE}/", params=params, timeout=config.HTTP_TIMEOUT
-        )
+        resp = requests.get(f"{base}/", params=params, timeout=config.HTTP_TIMEOUT)
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         for c in root.findall(f"{_S3_NS}Contents"):
-            key = c.findtext(f"{_S3_NS}Key", default="")
-            size = int(c.findtext(f"{_S3_NS}Size", default="0"))
-            rf = _decode_key(key, size)
-            if rf:
-                out.append(rf)
+            out.append((c.findtext(f"{_S3_NS}Key", default=""),
+                        int(c.findtext(f"{_S3_NS}Size", default="0"))))
         if root.findtext(f"{_S3_NS}IsTruncated") == "true":
             token = root.findtext(f"{_S3_NS}NextContinuationToken")
         else:
             break
     return out
+
+
+def _list_keys_at(base: str, prefix: str) -> list[RadarFile]:
+    return [rf for k, sz in list_raw(base, prefix)
+            if (rf := _decode_key(k, sz, base)) is not None]
 
 
 def _prefix_for(node: str, day: datetime) -> str:

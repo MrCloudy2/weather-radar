@@ -15,6 +15,12 @@ from .geo import Grid
 S3_ENDPOINT = "https://s3.waw3-1.cloudferro.com"
 S3_BUCKET = "openradar-24h"
 S3_BASE = f"{S3_ENDPOINT}/{S3_BUCKET}"
+# EUMETNET's temporary backup (ECMWF), same key layout. Since 2026-11-11 the
+# primary CloudFerro bucket has been empty after a cloud-provider incident and
+# new data only lands here. Listings try each base in order and use the first
+# one that actually has files for the prefix.
+S3_BASES = [S3_BASE,
+            "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup"]
 
 
 @dataclass(frozen=True)
